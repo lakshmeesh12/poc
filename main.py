@@ -7,12 +7,18 @@ import hashlib
 import json
 import pandas as pd
 from dotenv import load_dotenv
-
-from utils import get_file_hash, get_cached_result, save_to_cache, optimize_image, validate_query_result
+from fastapi import FastAPI, UploadFile, File
+from utils import get_file_hash, get_cached_result, save_to_cache, optimize_file, validate_query_result, is_pdf_file
 from textract import process_with_textract, extract_text_from_textract_response
 from llm_text import process_with_llm_text
-from llm_image import process_with_llm_image
+from llm_image import process_with_llm_media
 from validation import CSVValidator
+from fastapi.middleware.cors import CORSMiddleware
+from tamper_detection import TamperDetector
+import shutil
+from typing import List
+
+tamper_detector = TamperDetector()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -25,6 +31,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Allow requests from your React app's origin
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Define your custom queries for the adapter
 QUERIES = [
@@ -39,8 +53,11 @@ QUERIES = [
 # Result cache
 result_cache = {}
 
+# Hardcoded CSV file path for validation
+csv_path = "C:/Users/Quadrant/Downloads/sample database.csv"
+
 async def process_file(file_path: str, csv_validator=None):
-    """Process a single invoice file with 3-attempt approach and CSV validation."""
+    """Process a single invoice file with parallel tamper detection and text extraction."""
     try:
         # Check cache first
         file_hash = get_file_hash(file_path)
@@ -49,124 +66,126 @@ async def process_file(file_path: str, csv_validator=None):
             logger.info(f"Using cached result for {file_path}")
             return cached_result
 
-        # Initialize results dictionary with "Not Found" for ALL queries
+        # Initialize results dictionary
         results = {query["Text"]: "Not Found" for query in QUERIES}
         confidence_scores = {query["Text"]: 0.0 for query in QUERIES}
         sources = {query["Text"]: "None" for query in QUERIES}
         validation_results = {query["Text"]: False for query in QUERIES}
-        raw_extracted_text = ""
+        csv_matched_values = {query["Text"]: "Not Found" for query in QUERIES}  # Store CSV values
+        
+        # Check if file is PDF
+        is_pdf = is_pdf_file(file_path)
+        logger.info(f"Processing {file_path} - File type: {'PDF' if is_pdf else 'Image'}")
+        
+        # Optimize file before processing
+        optimized_file_bytes = optimize_file(file_path)
+        
+        # Start tamper detection in parallel with text extraction
+        logger.info(f"Starting parallel tamper detection for {file_path}")
+        tamper_detection_task = asyncio.create_task(tamper_detector.detect_tampering(file_path, {"is_pdf": is_pdf}))
         
         # FIRST ATTEMPT: Textract with adapter
         logger.info(f"ATTEMPT 1: Processing {file_path} with Textract adapter")
         
-        # Optimize image before sending to Textract
-        optimized_image_bytes = optimize_image(file_path)
+        textract_response, textract_results, textract_confidence, textract_validation = await process_with_textract(file_path, optimized_file_bytes, QUERIES, is_pdf)
         
-        # Process with Textract and get results
-        textract_response, textract_results, textract_confidence, textract_validation = await process_with_textract(file_path, optimized_image_bytes, QUERIES)
-        
-        # Extract raw text for potential second attempt
         raw_extracted_text = extract_text_from_textract_response(textract_response)
         logger.info(f"Extracted {len(raw_extracted_text)} characters of raw text from document")
         
-        # Update results with Textract findings
         for query_text, result_text in textract_results.items():
             results[query_text] = result_text
             confidence_scores[query_text] = textract_confidence.get(query_text, 0.0)
             sources[query_text] = "Textract (Attempt 1)"
             validation_results[query_text] = textract_validation.get(query_text, False)
         
-        # Determine queries for second attempt
         queries_for_second_attempt = []
-        
-        # Add queries with failed validation or low confidence
         for query_text, result_text in results.items():
             if not validation_results.get(query_text, False) or confidence_scores.get(query_text, 0) < 85.0:
                 queries_for_second_attempt.append({"Text": query_text})
                 logger.info(f"Query '{query_text}' with value '{result_text}' added to second attempt: validation={validation_results.get(query_text, False)}, confidence={confidence_scores.get(query_text, 0)}")
         
-        # SECOND ATTEMPT: OpenAI with extracted text (more token efficient)
+        second_attempt_task = None
         if queries_for_second_attempt and raw_extracted_text:
             logger.info(f"ATTEMPT 2: Processing {len(queries_for_second_attempt)} queries with OpenAI using extracted text")
-            
-            llm_results = await process_with_llm_text(raw_extracted_text, queries_for_second_attempt, 2)
-            
-            # Process the results
+            second_attempt_task = asyncio.create_task(process_with_llm_text(raw_extracted_text, queries_for_second_attempt, 2))
+        
+        queries_for_third_attempt = []
+        for query_text, result_text in results.items():
+            if result_text == "Not Found" or not validation_results.get(query_text, False):
+                queries_for_third_attempt.append({"Text": query_text})
+        
+        if second_attempt_task:
+            llm_results = await second_attempt_task
             for query_text, result in llm_results.items():
                 if isinstance(result, dict):
                     value = result.get("value", "Not Found")
-                    
-                    # Only update if the result is valid or better than what we had
                     if value != "Not Found" and validate_query_result(query_text, value):
                         results[query_text] = value
-                        confidence_scores[query_text] = result.get("confidence", 50.0)  # Default to medium confidence
+                        confidence_scores[query_text] = result.get("confidence", 50.0)
                         sources[query_text] = "OpenAI Text (Attempt 2)"
                         validation_results[query_text] = True
                         logger.info(f"Updated with text-based result for '{query_text}': Value='{value}', Valid=True")
         
-        # Determine queries for third attempt
         queries_for_third_attempt = []
-        
-        # Add any remaining "Not Found" or failed validation items
         for query_text, result_text in results.items():
             if result_text == "Not Found" or not validation_results.get(query_text, False):
                 queries_for_third_attempt.append({"Text": query_text})
                 logger.info(f"Query '{query_text}' with value '{result_text}' added to third attempt: validation={validation_results.get(query_text, False)}")
         
-        # THIRD ATTEMPT: OpenAI with image for remaining issues
+        third_attempt_task = None
         if queries_for_third_attempt:
-            logger.info(f"ATTEMPT 3: Processing {len(queries_for_third_attempt)} queries with OpenAI using image")
-            
-            llm_results = await process_with_llm_image(file_path, queries_for_third_attempt, 3)
-            
-            # Process the results
+            logger.info(f"ATTEMPT 3: Processing {len(queries_for_third_attempt)} queries with OpenAI using {'PDF' if is_pdf else 'image'}")
+            third_attempt_task = asyncio.create_task(process_with_llm_media(file_path, queries_for_third_attempt, 3))
+        
+        csv_validation_task = None
+        if csv_validator is not None:
+            logger.info(f"Starting parallel CSV validation")
+            csv_validation_task = asyncio.create_task(csv_validator.validate_against_csv(results))
+        
+        tamper_results = await tamper_detection_task
+        logger.info(f"Tamper detection completed for {file_path}")
+        
+        if third_attempt_task:
+            llm_results = await third_attempt_task
             for query_text, result in llm_results.items():
                 if isinstance(result, dict):
                     value = result.get("value", "Not Found")
-                    
-                    # Only update if the result is valid or better than what we had
                     if value != "Not Found" and validate_query_result(query_text, value):
                         results[query_text] = value
                         confidence_scores[query_text] = result.get("confidence", 50.0)
-                        sources[query_text] = "OpenAI Image (Attempt 3)"
+                        sources[query_text] = f"OpenAI {'PDF' if is_pdf else 'Image'} (Attempt 3)"
                         validation_results[query_text] = True
-                        logger.info(f"Updated with image-based result for '{query_text}': Value='{value}', Valid=True")
+                        logger.info(f"Updated with {'PDF' if is_pdf else 'image'}-based result for '{query_text}': Value='{value}', Valid=True")
                     elif results[query_text] == "Not Found":
-                        # Explicitly mark the source as Attempt 3 even if value is still "Not Found"
-                        sources[query_text] = "OpenAI Image (Attempt 3)"
+                        sources[query_text] = f"OpenAI {'PDF' if is_pdf else 'Image'} (Attempt 3)"
         
-        # Validate against CSV if provided
         csv_validation_results = {}
-        if csv_validator is not None:
-            logger.info(f"Validating results against CSV database")
+        if csv_validation_task:
             try:
-                csv_validation_results = await csv_validator.validate_against_csv(results)
-                
-                # Update validation results
-                for query_text, is_valid in csv_validation_results.items():
-                    validation_results[query_text] = is_valid
-                    
-                    # Add CSV as source for fully validated items
-                    if is_valid:
+                csv_validation_results = await csv_validation_task
+                for query_text, validation in csv_validation_results.items():
+                    validation_results[query_text] = validation["is_valid"]
+                    if validation["is_valid"]:
                         sources[query_text] += " + CSV Validated"
+                    csv_matched_values[query_text] = validation["csv_value"]
             except Exception as e:
                 logger.error(f"Error during CSV validation: {str(e)}")
                 import traceback
                 logger.error(traceback.format_exc())
         
-        # Prepare final result
         final_result = {
             "file": os.path.basename(file_path),
+            "file_type": "PDF" if is_pdf else "Image",
             "results": results,
             "confidence_scores": confidence_scores,
             "sources": sources,
             "validation_results": validation_results,
-            "csv_validation_results": csv_validation_results
+            "csv_validation_results": csv_validation_results,
+            "csv_matched_values": csv_matched_values,
+            "tamper_detection": tamper_results
         }
         
-        # Cache the result
         await save_to_cache(file_hash, final_result, result_cache)
-        
         return final_result
     except Exception as e:
         logger.error(f"Error processing file {file_path}: {str(e)}")
@@ -184,105 +203,148 @@ async def process_batch(files, csv_validator=None, batch_size=4):
         results.extend(batch_results)
     return results
 
-@app.post("/extract-invoices/")
-async def extract_invoices(data: dict):
-    """Extract data from invoice files and validate against CSV database."""
-    folder_path = data.get("folder_path")
-    csv_path = data.get("csv_path")  # New parameter for CSV file
-    
-    if not folder_path:
-        return {"error": "Folder path must be provided in the request body as 'folder_path'"}
+def convert_numpy_types(obj):
+    """Convert numpy types to Python standard types for JSON serialization."""
+    import numpy as np
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(i) for i in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_types(i) for i in obj)
+    else:
+        return obj
 
-    folder = Path(folder_path)
-    if not folder.exists() or not folder.is_dir():
-        return {"error": f"Invalid folder path: {folder_path}"}
+@app.post("/extract-invoices/", response_model=None)
+async def extract_invoices(files: List[UploadFile] = File(...)):
+    """Extract data from uploaded invoice files and validate against hardcoded CSV database."""
+    # Temporary directory to store uploaded files
+    temp_dir = Path("temp_uploads")
+    temp_dir.mkdir(exist_ok=True)
 
-    # Find all relevant files
-    invoice_files = list(folder.glob("*.jpg")) + list(folder.glob("*.png"))
-    if not invoice_files:
-        return {"error": f"No JPG or PNG files found in {folder_path}"}
+    # Save uploaded files locally
+    file_paths = []
+    try:
+        for file in files:
+            file_path = temp_dir / file.filename
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            file_paths.append(str(file_path))
+            logger.info(f"Saved uploaded file to {file_path}")
 
-    logger.info(f"Found {len(invoice_files)} files to process in {folder_path}")
+        if not file_paths:
+            return {"error": "No files uploaded"}
 
-    # Load CSV database if provided
-    csv_validator = None
-    if csv_path:
+        # Load hardcoded CSV database
+        csv_validator = None
         csv_file = Path(csv_path)
-        if not csv_file.exists() or not csv_file.is_file():
-            return {"error": f"Invalid CSV file path: {csv_path}"}
-            
-        csv_validator = CSVValidator()
-        csv_df = await csv_validator.load_csv_database(csv_path)
-        if csv_df is None:
-            return {"error": f"Failed to load CSV database from {csv_path}"}
-            
-        logger.info(f"Loaded CSV database with {len(csv_df)} records for validation")
-
-    # Process in optimal batch sizes
-    batch_size = min(4, len(invoice_files))
-    start_time = asyncio.get_event_loop().time()
-    results = await process_batch([str(file) for file in invoice_files], csv_validator, batch_size)
-    end_time = asyncio.get_event_loop().time()
-    
-    logger.info(f"Processed {len(invoice_files)} files in {end_time - start_time:.2f} seconds")
-
-    # Format results
-    formatted_results = []
-    for result in results:
-        if "error" not in result:
-            query_results = {}
-            
-            # Ensure ALL queries are included
-            for query in QUERIES:
-                query_text = query["Text"]
-                
-                # Get values from results, with appropriate fallbacks
-                value = result["results"].get(query_text, "Not Found")
-                confidence = result["confidence_scores"].get(query_text, 0.0)
-                source = result["sources"].get(query_text, "None")
-                validated = result["validation_results"].get(query_text, False)
-                
-                # Format the output correctly
-                if value != "Not Found" and confidence > 0:
-                    query_results[query_text] = {
-                        "value": value,
-                        "confidence": confidence,
-                        "source": source,
-                        "csv_validated": validated
-                    }
-                else:
-                    query_results[query_text] = {
-                        "value": "Not Found",
-                        "reason": "Lack of information or image quality issue",
-                        "source": source,
-                        "csv_validated": False
-                    }
-            
-            formatted_results.append({
-                "filename": result["file"],
-                "data": query_results,
-                "csv_validation": {
-                    "status": "Validated" if any(r.get("csv_validated", False) for r in query_results.values()) else "Not Found in CSV",
-                    "primary_key": result["results"].get("What is the chassis number?", "Not Found")
-                }
-            })
+        if csv_file.exists() and csv_file.is_file():
+            csv_validator = CSVValidator()
+            csv_df = await csv_validator.load_csv_database(csv_path)
+            if csv_df is None:
+                logger.error(f"Failed to load hardcoded CSV database from {csv_path}")
+            else:
+                logger.info(f"Loaded hardcoded CSV database with {len(csv_df)} records for validation")
         else:
-            formatted_results.append({
-                "filename": result["file"],
-                "error": result["error"]
-            })
+            logger.warning(f"Hardcoded CSV file not found at {csv_path}, proceeding without validation")
 
-    return {
-        "invoices": formatted_results, 
-        "processing_time_seconds": end_time - start_time,
-        "csv_validation": {
-            "status": "Enabled" if csv_validator is not None else "Disabled",
-            "records_count": len(csv_validator.csv_df) if csv_validator is not None else 0
+        # Process files
+        batch_size = min(4, len(file_paths))
+        start_time = asyncio.get_event_loop().time()
+        results = await process_batch(file_paths, csv_validator, batch_size)
+        end_time = asyncio.get_event_loop().time()
+        
+        logger.info(f"Processed {len(file_paths)} files in {end_time - start_time:.2f} seconds")
+
+        # Format results
+        formatted_results = []
+        for result in results:
+            if "error" not in result:
+                query_results = {}
+                for query in QUERIES:
+                    query_text = query["Text"]
+                    value = result["results"].get(query_text, "Not Found")
+                    confidence = result["confidence_scores"].get(query_text, 0.0)
+                    source = result["sources"].get(query_text, "None")
+                    validated = result["validation_results"].get(query_text, False)
+                    csv_value = result["csv_matched_values"].get(query_text, "Not Found")
+                    
+                    if value != "Not Found" and confidence > 0:
+                        query_results[query_text] = {
+                            "value": value,
+                            "confidence": confidence,
+                            "source": source,
+                            "csv_validated": validated,
+                            "csv_value": csv_value
+                        }
+                    else:
+                        query_results[query_text] = {
+                            "value": "Not Found",
+                            "reason": "Lack of information or quality issue",
+                            "source": source,
+                            "csv_validated": False,
+                            "csv_value": csv_value
+                        }
+                
+                tamper_info = result.get("tamper_detection", {})
+                formatted_results.append({
+                    "filename": result["file"],
+                    "file_type": result.get("file_type", "Image"),
+                    "data": query_results,
+                    "csv_validation": {
+                        "status": "Validated" if any(r.get("csv_validated", False) for r in query_results.values()) else "Not Found in CSV",
+                        "primary_key": result["results"].get("What is the chassis number?", "Not Found")
+                    },
+                    "tamper_detection": {
+                        "tampering_detected": tamper_info.get("tampering_detected", False),
+                        "confidence": tamper_info.get("confidence_score", 0.0),
+                        "methods": tamper_info.get("tampering_methods", []),
+                        "details": tamper_info.get("method_details", []),
+                        "annotated_image": tamper_info.get("annotated_image", "")  # Include annotated image
+                    }
+                })
+            else:
+                formatted_results.append({
+                    "filename": result["file"],
+                    "error": result["error"]
+                })
+
+        final_response = {
+            "invoices": formatted_results,
+            "processing_time_seconds": end_time - start_time,
+            "file_types_processed": {
+                "images": len([r for r in formatted_results if "file_type" in r and r["file_type"] == "Image"]),
+                "pdfs": len([r for r in formatted_results if "file_type" in r and r["file_type"] == "PDF"])
+            },
+            "csv_validation": {
+                "status": "Enabled" if csv_validator is not None else "Disabled",
+                "records_count": len(csv_validator.csv_df) if csv_validator is not None else 0
+            },
+            "tamper_detection": {
+                "status": "Enabled",
+                "methods_used": ["ELA", "Font Analysis", "Alignment Check", "Metadata Analysis", "Data Consistency"]
+            }
         }
-    }
+        final_response = convert_numpy_types(final_response)
+        return final_response
 
-# Import validation function
-from utils import validate_query_result
+    finally:
+        # Clean up temporary files
+        for file_path in file_paths:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Cleaned up temporary file: {file_path}")
+        if temp_dir.exists() and not any(temp_dir.iterdir()):
+            temp_dir.rmdir()
+            logger.info(f"Removed temporary directory: {temp_dir}")
 
 if __name__ == "__main__":
     import uvicorn
