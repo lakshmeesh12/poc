@@ -1,0 +1,453 @@
+/* src/home.css */
+.app-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 30px;
+    font-family: 'Roboto', sans-serif;
+    background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    min-height: 100vh;
+    padding-top: 80px; /* Space for fixed navbar */
+    position: relative; /* For overlay positioning */
+}
+
+/* Navbar Styles */
+.navbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #ffffff; /* White background for better contrast */
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); /* Subtle shadow for depth */
+    padding: 10px 20px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    z-index: 1000;
+}
+
+.nav-links {
+    list-style: none;
+    display: flex;
+    gap: 20px;
+    margin: 0;
+    padding: 0;
+}
+
+.nav-links a {
+    color: #2c3e50;
+    text-decoration: none;
+    font-size: 1.1rem;
+    transition: color 0.3s;
+}
+
+.nav-links a:hover {
+    color: #3498db;
+}
+
+.logo-container {
+    margin-right: 10px; /* Space from the right edge */
+}
+
+.navbar-logo {
+    height: 50px; /* Fixed height for consistency */
+    max-width: 100%; /* Prevents overflow beyond the container */
+    object-fit: contain; /* Maintains aspect ratio while fitting within bounds */
+}
+
+/* Title Styles */
+.title-container {
+    text-align: center;
+    margin-bottom: 30px;
+}
+
+.app-title {
+    font-size: 2rem; /* Reduced from 2.5rem for better aesthetics */
+    color: #2c3e50;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.app-subtitle {
+    font-size: 1.1rem;
+    color: #7f8c8d;
+    margin: 0;
+}
+
+/* Professional Futuristic Loading Overlay */
+.futuristic-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(15, 23, 42, 0.75);
+    backdrop-filter: blur(8px);
+    z-index: 2000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    animation: overlay-fade 0.3s ease-in;
+}
+
+@keyframes overlay-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.spinner-container {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    width: 200px;
+    height: 200px;
+}
+
+.spinner {
+    position: relative;
+    width: 120px;
+    height: 120px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border-radius: 50%;
+    background: rgba(41, 50, 65, 0.7);
+    box-shadow: 0 0 20px rgba(52, 152, 219, 0.4);
+}
+
+.spinner::before {
+    content: '';
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    border-top: 3px solid #3498db;
+    border-right: 3px solid #3498db;
+    animation: spin 2s linear infinite;
+}
+
+.spinner::after {
+    content: '';
+    position: absolute;
+    width: 85%;
+    height: 85%;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-bottom: 2px solid #3498db;
+    border-left: 2px solid #3498db;
+    animation: spin 1.5s linear infinite reverse;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.spinner-inner {
+    width: 70%;
+    height: 70%;
+    background: radial-gradient(circle, #1e2a3a 30%, #2c3e50 100%);
+    border-radius: 50%;
+    z-index: 5;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    box-shadow: inset 0 0 10px rgba(52, 152, 219, 0.3);
+    position: relative;
+}
+
+.spinner-inner::after {
+    content: '';
+    position: absolute;
+    width: 60%;
+    height: 60%;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, transparent 0%, #3498db 20%, transparent 40%);
+    animation: rotate 2s linear infinite;
+}
+
+@keyframes rotate {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.spinner-text {
+    margin-top: 24px;
+    font-family: 'Roboto', sans-serif;
+    font-weight: 500;
+    font-size: 16px;
+    color: #ffffff;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    animation: blink 1.5s infinite;
+}
+
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+/* Rest of the Existing Styles */
+.upload-section {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 30px;
+}
+
+.upload-label {
+    font-size: 1.1rem;
+    color: #34495e;
+}
+
+.upload-input {
+    padding: 10px;
+    border: 2px solid #3498db;
+    border-radius: 5px;
+    background-color: #fff;
+    cursor: pointer;
+}
+
+.upload-input:hover {
+    border-color: #2980b9;
+}
+
+.analyze-button {
+    padding: 12px 25px;
+    background: linear-gradient(45deg, #3498db, #2980b9);
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: transform 0.2s, background 0.3s;
+}
+
+.analyze-button:hover {
+    transform: scale(1.05);
+    background: linear-gradient(45deg, #2980b9, #3498db);
+}
+
+.analyze-button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.error-message {
+    color: #e74c3c;
+    text-align: center;
+    margin: 20px 0;
+    font-size: 1.1rem;
+}
+
+.results-container {
+    background-color: #fff;
+    border-radius: 10px;
+    padding: 20px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.invoice-result {
+    margin-bottom: 40px;
+}
+
+.invoice-title {
+    font-size: 1.8rem;
+    color: #2c3e50;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #3498db;
+    padding-bottom: 5px;
+}
+
+/* Fraud Detection Section */
+.fraud-section {
+    margin-bottom: 40px;
+}
+
+.fraud-section h3 {
+    font-size: 1.5rem;
+    color: #34495e;
+    margin-bottom: 15px;
+}
+
+.fraud-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+}
+
+.fraud-table th,
+.fraud-table td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+.fraud-table th {
+    background-color: #3498db;
+    color: white;
+    font-weight: 600;
+}
+
+.fraud-table tr.mismatch {
+    background-color: #ffe6e6;
+    color: #e74c3c;
+}
+
+.fraud-table tr.mismatch td {
+    font-weight: bold;
+}
+
+.summary {
+    padding: 15px;
+    border-radius: 5px;
+    font-size: 1.1rem;
+}
+
+.summary.success {
+    background-color: #e7f3e7;
+    color: #2ecc71;
+}
+
+.summary.error {
+    background-color: #f9e6e6;
+    color: #e74c3c;
+}
+
+.summary.warning {
+    background-color: #fff3cd;
+    color: #d4a017;
+}
+
+/* Tampering Detection Section */
+.tamper-section {
+    background: linear-gradient(145deg, #ecf0f1, #bdc3c7);
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.tamper-section h3 {
+    font-size: 1.5rem;
+    color: #34495e;
+    margin-bottom: 15px;
+}
+
+.tamper-status {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.status-icon {
+    font-size: 2rem;
+}
+
+.status-icon.alert {
+    color: #e74c3c;
+}
+
+.status-icon.safe {
+    color: #2ecc71;
+}
+
+.tamper-status h4 {
+    font-size: 1.3rem;
+    margin: 0;
+    color: #2c3e50;
+}
+
+.tamper-status p {
+    margin: 5px 0 0;
+    color: #7f8c8d;
+}
+
+.tamper-details {
+    margin-bottom: 20px;
+}
+
+.tamper-details h4 {
+    font-size: 1.2rem;
+    color: #34495e;
+    margin-bottom: 10px;
+}
+
+.tamper-details ul {
+    list-style: none;
+    padding: 0;
+}
+
+.tamper-details li {
+    background-color: #f9e6e6;
+    padding: 10px;
+    margin-bottom: 5px;
+    border-radius: 5px;
+    color: #e74c3c;
+}
+
+.tamper-all-methods h4 {
+    font-size: 1.2rem;
+    color: #34495e;
+    margin-bottom: 15px;
+}
+
+.method-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 15px;
+}
+
+.method-card {
+    background-color: #fff;
+    padding: 15px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s;
+}
+
+.method-card:hover {
+    transform: translateY(-3px);
+}
+
+.method-card.alert {
+    border-left: 5px solid #e74c3c;
+}
+
+.method-card.safe {
+    border-left: 5px solid #2ecc71;
+}
+
+.method-card p {
+    margin: 5px 0;
+    color: #34495e;
+}
+
+.annotated-image {
+    margin-top: 20px;
+    text-align: center;
+}
+
+.annotated-image h4 {
+    font-size: 1.2rem;
+    color: #087ef3;
+    margin-bottom: 10px;
+}
+
+.annotated-image img {
+    max-width: 100%;
+    height: auto;
+    border: 2px solid #e74c3c;
+    border-radius: 5px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.annotated-image p {
+    margin-top: 10px;
+    font-size: 0.9rem;
+    color: #7f8c8d;
+}
