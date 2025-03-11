@@ -17,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from tamper_detection import TamperDetector
 import shutil
 from typing import List
+from pydantic import BaseModel
+import boto3
 
 tamper_detector = TamperDetector()
 
@@ -32,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+class S3Request(BaseModel):
+    bucket: str
+    file_keys: List[str]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],  # Allow requests from your React app's origin
@@ -40,6 +46,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize AWS S3 client
+s3_client = boto3.client('s3', region_name="us-west-2")
 # Define your custom queries for the adapter
 QUERIES = [
     {"Text": "What is the chassis number?"},
@@ -345,6 +353,152 @@ async def extract_invoices(files: List[UploadFile] = File(...)):
         if temp_dir.exists() and not any(temp_dir.iterdir()):
             temp_dir.rmdir()
             logger.info(f"Removed temporary directory: {temp_dir}")
+
+@app.get("/list-buckets/")
+async def list_buckets():
+    """List all available S3 buckets for the user to select."""
+    try:
+        response = s3_client.list_buckets()
+        buckets = [bucket['Name'] for bucket in response['Buckets']]
+        return {"buckets": buckets}
+    except Exception as e:
+        logger.error(f"Error listing buckets: {str(e)}")
+        return {"error": str(e)}
+
+# New endpoint to list files in a bucket
+@app.get("/list-files/")
+async def list_files(bucket: str):
+    """List all files in the specified S3 bucket."""
+    try:
+        response = s3_client.list_objects_v2(Bucket=bucket)
+        if 'Contents' in response:
+            files = [obj['Key'] for obj in response['Contents']]
+            return {"files": files}
+        else:
+            return {"files": []}
+    except Exception as e:
+        logger.error(f"Error listing files in bucket {bucket}: {str(e)}")
+        return {"error": str(e)}
+
+# New endpoint to process S3 files
+@app.post("/extract-invoices-s3/")
+async def extract_invoices_s3(request: S3Request):
+    bucket = request.bucket
+    file_keys = request.file_keys
+    
+    """Process selected files from an S3 bucket for fraud and tampering detection."""
+    temp_dir = Path("temp_s3_downloads")
+    temp_dir.mkdir(exist_ok=True)
+    file_paths = []
+
+    try:
+        # Download files from S3
+        for key in file_keys:
+            file_path = temp_dir / key.replace('/', '_')  # Flatten file structure
+            s3_client.download_file(bucket, key, str(file_path))
+            file_paths.append(str(file_path))
+            logger.info(f"Downloaded {key} from S3 to {file_path}")
+
+        # Load CSV validator if available
+        csv_validator = None
+        csv_file = Path(csv_path)
+        if csv_file.exists() and csv_file.is_file():
+            csv_validator = CSVValidator()
+            csv_df = await csv_validator.load_csv_database(csv_path)
+            if csv_df is None:
+                logger.error(f"Failed to load CSV database from {csv_path}")
+            else:
+                logger.info(f"Loaded CSV database with {len(csv_df)} records")
+
+        # Process files using existing logic
+        batch_size = min(4, len(file_paths))
+        start_time = asyncio.get_event_loop().time()
+        results = await process_batch(file_paths, csv_validator, batch_size)
+        end_time = asyncio.get_event_loop().time()
+
+        logger.info(f"Processed {len(file_paths)} S3 files in {end_time - start_time:.2f} seconds")
+
+        # Format results (same as local upload)
+        formatted_results = []
+        for result in results:
+            if "error" not in result:
+                query_results = {}
+                for query in QUERIES:
+                    query_text = query["Text"]
+                    value = result["results"].get(query_text, "Not Found")
+                    confidence = result["confidence_scores"].get(query_text, 0.0)
+                    source = result["sources"].get(query_text, "None")
+                    validated = result["validation_results"].get(query_text, False)
+                    csv_value = result["csv_matched_values"].get(query_text, "Not Found")
+
+                    if value != "Not Found" and confidence > 0:
+                        query_results[query_text] = {
+                            "value": value,
+                            "confidence": confidence,
+                            "source": source,
+                            "csv_validated": validated,
+                            "csv_value": csv_value
+                        }
+                    else:
+                        query_results[query_text] = {
+                            "value": "Not Found",
+                            "reason": "Lack of information or quality issue",
+                            "source": source,
+                            "csv_validated": False,
+                            "csv_value": csv_value
+                        }
+
+                tamper_info = result.get("tamper_detection", {})
+                formatted_results.append({
+                    "filename": result["file"],
+                    "file_type": result.get("file_type", "Image"),
+                    "data": query_results,
+                    "csv_validation": {
+                        "status": "Validated" if any(r.get("csv_validated", False) for r in query_results.values()) else "Not Found in CSV",
+                        "primary_key": result["results"].get("What is the chassis number?", "Not Found")
+                    },
+                    "tamper_detection": {
+                        "tampering_detected": tamper_info.get("tampering_detected", False),
+                        "confidence": tamper_info.get("confidence_score", 0.0),
+                        "methods": tamper_info.get("tampering_methods", []),
+                        "details": tamper_info.get("method_details", []),
+                        "annotated_image": tamper_info.get("annotated_image", "")
+                    }
+                })
+            else:
+                formatted_results.append({
+                    "filename": result["file"],
+                    "error": result["error"]
+                })
+
+        final_response = {
+            "invoices": formatted_results,
+            "processing_time_seconds": end_time - start_time,
+            "file_types_processed": {
+                "images": len([r for r in formatted_results if "file_type" in r and r["file_type"] == "Image"]),
+                "pdfs": len([r for r in formatted_results if "file_type" in r and r["file_type"] == "PDF"])
+            },
+            "csv_validation": {
+                "status": "Enabled" if csv_validator is not None else "Disabled",
+                "records_count": len(csv_validator.csv_df) if csv_validator is not None else 0
+            },
+            "tamper_detection": {
+                "status": "Enabled",
+                "methods_used": ["ELA", "Font Analysis", "Alignment Check", "Metadata Analysis", "Data Consistency"]
+            }
+        }
+        final_response = convert_numpy_types(final_response)
+        return final_response
+
+    finally:
+        # Clean up temporary files
+        for file_path in file_paths:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Cleaned up temporary S3 file: {file_path}")
+        if temp_dir.exists() and not any(temp_dir.iterdir()):
+            temp_dir.rmdir()
+            logger.info(f"Removed temporary S3 directory: {temp_dir}")
 
 if __name__ == "__main__":
     import uvicorn

@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def process_with_llm_text(extracted_text: str, queries_to_process: list, attempt: int):
-    """Process specified queries with GPT-4o using extracted text, not image."""
+    """
+    Process specified queries with GPT-4o using extracted text.
+    Works with text extracted from both PDFs and images.
+    """
     try:
         # Prepare prompt with extracted text
         prompt = (
-            f"Below is the extracted text from an invoice document. Extract the following information and return as JSON with 'value' and 'confidence' (0-100) for each query. "
+            f"Below is the extracted text from a document (PDF or image). Extract the following information and return as JSON with 'value' and 'confidence' (0-100) for each query. "
             f"If information can't be extracted, include 'reason' instead of 'confidence'. "
             f"Return only JSON, no markdown.\n\n"
             f"EXTRACTED TEXT:\n{extracted_text}\n\nQUERIES:\n"
@@ -57,7 +60,7 @@ async def process_with_llm_text(extracted_text: str, queries_to_process: list, a
         )
 
         llm_response = response.choices[0].message.content.strip()
-        logger.info(f"LLM text-based response received (Attempt {attempt})")
+        logger.info(f"LLM text-based response received (Attempt {attempt}) for {'PDF or image'} document")
 
         # Clean up the response
         cleaned_response = llm_response
