@@ -1,8 +1,11 @@
 import hashlib
 import re
 import logging
+import mimetypes
+from pathlib import Path
 from PIL import Image
 import io
+import PyPDF2
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -33,6 +36,10 @@ async def save_to_cache(file_hash: str, result, cache_dict: dict):
     """Save result to cache."""
     cache_dict[file_hash] = result
 
+def is_pdf_file(file_path: str) -> bool:
+    """Check if file is a PDF."""
+    return file_path.lower().endswith('.pdf')
+
 def optimize_image(file_path: str, quality: int = 85, max_size: int = 1800) -> bytes:
     """Optimize image size before sending to APIs."""
     try:
@@ -52,6 +59,31 @@ def optimize_image(file_path: str, quality: int = 85, max_size: int = 1800) -> b
         logger.warning(f"Image optimization failed for {file_path}: {str(e)}. Using original file.")
         with open(file_path, 'rb') as f:
             return f.read()
+
+def prepare_pdf(file_path: str) -> bytes:
+    """Read PDF file as bytes for processing."""
+    try:
+        # First check if it's a valid PDF file
+        with open(file_path, 'rb') as f:
+            try:
+                PyPDF2.PdfReader(f)
+                logger.info(f"Successfully validated PDF format for {file_path}")
+            except Exception as e:
+                logger.warning(f"Invalid PDF format detected in {file_path}: {str(e)}")
+                
+        # Return the file as bytes
+        with open(file_path, 'rb') as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"Error preparing PDF file {file_path}: {str(e)}")
+        raise
+
+def optimize_file(file_path: str) -> bytes:
+    """Optimize a file based on its type."""
+    if is_pdf_file(file_path):
+        return prepare_pdf(file_path)
+    else:
+        return optimize_image(file_path)
 
 def validate_query_result(query_text, value):
     """Validate the result of a query against its expected pattern."""

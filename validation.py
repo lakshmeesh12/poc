@@ -1,207 +1,145 @@
+# In validation.py
+
 import logging
 import pandas as pd
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 class CSVValidator:
     def __init__(self):
-        self.csv_df = None
+        self.csv_df = None  # Lowercase version for matching
+        self.csv_df_original = None  # Original case for display
         self.csv_to_query_mapping = {}
         self.query_to_csv_mapping = {}
+        self.primary_keys = [
+            "What is the chassis number?",
+            "What is the engine number?",
+            "What is the InsuranceNo or policy number?",
+            "What is the customer name?"
+        ]
 
     async def load_csv_database(self, csv_path):
-        """Load the CSV database into a pandas DataFrame with proper handling of column names."""
+        """Load the CSV database into a pandas DataFrame."""
         try:
-            # Try standard CSV loading first
-            try:
-                df = pd.read_csv(csv_path)
-            except:
-                # If standard loading fails, try with different delimiters or custom parsing
-                with open(csv_path, 'r', encoding='utf-8') as file:
-                    content = file.read()
-                
-                # Check if the file has proper delimiters
-                if ',' not in content and ' ' in content:
-                    # Treat spaces as separators, but be careful about spaces in values
-                    lines = content.strip().split('\n')
-                    if lines:
-                        # Parse header to get column names
-                        header_line = lines[0]
-                        # Try to identify column names by looking for expected headers
-                        expected_headers = ["Chassis No.", "Engine No.", "Make", "Colors", "Model Name", "Customer Name"]
-                        
-                        # Find indices of headers in the string
-                        header_positions = {}
-                        for header in expected_headers:
-                            if header in header_line:
-                                header_positions[header] = header_line.find(header)
-                        
-                        # Sort headers by position
-                        sorted_headers = [h for h, _ in sorted(header_positions.items(), key=lambda x: x[1])]
-                        
-                        # Parse data rows
-                        data = []
-                        for i in range(1, len(lines)):
-                            row_data = {}
-                            line = lines[i]
-                            
-                            # For each header, find the data between current header position and next header position
-                            for j, header in enumerate(sorted_headers):
-                                start_pos = header_positions[header]
-                                if j < len(sorted_headers) - 1:
-                                    end_pos = header_positions[sorted_headers[j+1]]
-                                    value = line[start_pos:end_pos].strip()
-                                else:
-                                    value = line[start_pos:].strip()
-                                
-                                row_data[header] = value
-                            
-                            data.append(row_data)
-                        
-                        # Create DataFrame
-                        df = pd.DataFrame(data)
-                    else:
-                        raise ValueError("Failed to parse CSV file - no content found")
-            
-            # Log the column names to help with debugging
+            df = pd.read_csv(csv_path)
             logger.info(f"CSV columns found: {list(df.columns)}")
-            
-            # Define CSV to query mapping
+
+            # Define column mappings
             csv_to_query_mapping = {
-                "Chassis No.": "What is the chassis number?",
-                "Engine No.": "What is the engine number?",
+                "ChassisNumber": "What is the chassis number?",
+                "EngineMotorNumber": "What is the engine number?",
                 "Make": "What is the make?",
-                "Model Name": "What is the model?",
-                "Colors": "What is the color?",
-                "Customer Name": "What is the customer name?"
+                "ModelName": "What is the model?",
+                "CustomerName": "What is the customer name?",
+                "InsuranceNo": "What is the InsuranceNo or policy number?",
+                "Vehicle_Insurance_Company": "What is the Vehicle_Insurance_Company or policy provider company?"
             }
-            
-            # Check if expected columns exist
+
+            # Handle missing or misnamed columns
             missing_columns = [col for col in csv_to_query_mapping.keys() if col not in df.columns]
             if missing_columns:
-                logger.warning(f"Missing expected columns in CSV: {missing_columns}")
-                
-                # Try to map close column names (case insensitive)
+                logger.warning(f"Missing columns: {missing_columns}")
                 actual_columns = [col.lower() for col in df.columns]
                 fixed_mapping = {}
-                
                 for expected_col in csv_to_query_mapping.keys():
                     if expected_col not in df.columns:
-                        expected_lower = expected_col.lower()
-                        expected_no_dot = expected_lower.replace('.', '')
-                        expected_no_space = expected_lower.replace(' ', '')
-                        
-                        # Find closest match
+                        expected_lower = expected_col.lower().replace('.', '').replace(' ', '')
                         for i, actual_col in enumerate(actual_columns):
-                            actual_no_dot = actual_col.replace('.', '')
-                            actual_no_space = actual_col.replace(' ', '')
-                            
-                            if (expected_lower in actual_col or 
-                                actual_col in expected_lower or
-                                expected_no_dot in actual_no_dot or
-                                expected_no_space in actual_no_space):
+                            actual_no_dot = actual_col.replace('.', '').replace(' ', '')
+                            if expected_lower in actual_no_dot or actual_no_dot in expected_lower:
                                 fixed_mapping[expected_col] = df.columns[i]
-                                logger.info(f"Mapped '{expected_col}' to existing column '{df.columns[i]}'")
+                                logger.info(f"Mapped '{expected_col}' to '{df.columns[i]}'")
                                 break
-                
-                # Update column mapping
                 for expected_col, actual_col in fixed_mapping.items():
                     query = csv_to_query_mapping[expected_col]
                     csv_to_query_mapping[actual_col] = query
                     del csv_to_query_mapping[expected_col]
-            
-            # Set the class variables
+
             self.csv_to_query_mapping = csv_to_query_mapping
             self.query_to_csv_mapping = {v: k for k, v in csv_to_query_mapping.items()}
-            
-            logger.info(f"Updated CSV mapping: {self.csv_to_query_mapping}")
+            logger.info(f"CSV mapping: {self.csv_to_query_mapping}")
 
-            # Convert all string columns to lowercase for case-insensitive matching
+            # Store original and lowercase versions
+            self.csv_df_original = df.copy()  # Preserve original case
             for col in df.columns:
                 if df[col].dtype == 'object':
-                    df[col] = df[col].astype(str).str.lower()
-                    
-            logger.info(f"Successfully loaded CSV database with {len(df)} records")
+                    df[col] = df[col].astype(str).str.lower()  # Lowercase for matching
             self.csv_df = df
+            logger.info(f"Loaded CSV with {len(df)} records")
             return df
-            
+
         except Exception as e:
-            logger.error(f"Error loading CSV database: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.error(f"Error loading CSV: {str(e)}")
             return None
 
     async def validate_against_csv(self, results):
-        """
-        Validate extraction results against the CSV database.
-        Uses chassis number as the primary key.
-        """
+        """Validate extraction results against the CSV database using multiple primary keys in sequence."""
         if self.csv_df is None:
-            logger.warning("CSV database not loaded, cannot validate")
-            return {query: False for query in results}
-            
-        validation_results = {}
-        
-        # Get the chassis number from the results
-        chassis_query = "What is the chassis number?"
-        chassis_number = results.get(chassis_query, "Not Found")
-        
-        if chassis_number == "Not Found":
-            logger.warning("Chassis number not found, cannot validate against CSV")
-            return {query: False for query in results}
-        
-        # Find the matching row in the CSV
-        chassis_col = self.query_to_csv_mapping.get(chassis_query)
-        if not chassis_col or chassis_col not in self.csv_df.columns:
-            logger.error(f"Cannot find chassis column '{chassis_col}' in CSV columns: {list(self.csv_df.columns)}")
-            return {query: False for query in results}
-        
-        # Convert chassis_number to lowercase for comparison
-        chassis_number = chassis_number.lower()
-        
-        # Find matching row
-        matching_rows = self.csv_df[self.csv_df[chassis_col] == chassis_number]
-        
-        if len(matching_rows) == 0:
-            logger.warning(f"No matching chassis number '{chassis_number}' found in CSV")
-            return {query: False for query in results}
-        
-        if len(matching_rows) > 1:
-            logger.warning(f"Multiple entries found for chassis number '{chassis_number}' in CSV")
-        
-        # Use the first matching row
-        csv_row = matching_rows.iloc[0]
-        
-        # Validate each field
-        for query, extracted_value in results.items():
-            if query == chassis_query:
-                # Chassis number already matched
-                validation_results[query] = True
+            logger.warning("CSV not loaded")
+            return {query: {"is_valid": False, "csv_value": "Not Found", "primary_key_used": None} for query in results}
+
+        validation_results = {query: {"is_valid": False, "csv_value": "Not Found", "primary_key_used": None} for query in results}
+        matching_row = None
+        primary_key_used = None
+
+        # Try each primary key in sequence
+        for primary_key_query in self.primary_keys:
+            primary_key_value = results.get(primary_key_query, "Not Found").lower()
+            if primary_key_value == "Not Found":
+                logger.info(f"Skipping {primary_key_query} as it was not found in extracted results")
                 continue
-                
+
+            primary_key_col = self.query_to_csv_mapping.get(primary_key_query)
+            if not primary_key_col or primary_key_col not in self.csv_df.columns:
+                logger.error(f"Primary key column '{primary_key_col}' not found in CSV")
+                continue
+
+            matching_rows = self.csv_df[self.csv_df[primary_key_col] == primary_key_value]
+            if len(matching_rows) == 1:
+                matching_row = matching_rows.iloc[0]
+                primary_key_used = primary_key_query
+                logger.info(f"Match found using {primary_key_query} = '{primary_key_value}'")
+                break
+            elif len(matching_rows) > 1:
+                logger.warning(f"Multiple matches for {primary_key_query}: '{primary_key_value}'. Using first match.")
+                matching_row = matching_rows.iloc[0]
+                primary_key_used = primary_key_query
+                break
+
+        # If no match is found after all attempts
+        if matching_row is None:
+            logger.warning("No match found using any primary key")
+            return validation_results
+
+        # Get the original row (with original casing) for display
+        original_row = self.csv_df_original.iloc[matching_row.name]
+
+        # Validate all fields against the matched row
+        for query, extracted_value in results.items():
             csv_col = self.query_to_csv_mapping.get(query)
             if not csv_col or csv_col not in self.csv_df.columns:
-                logger.warning(f"No CSV column found for query '{query}' (mapped to '{csv_col}')")
-                validation_results[query] = False
+                logger.warning(f"No CSV column for '{query}' (mapped to '{csv_col}')")
                 continue
-                
-            csv_value = csv_row[csv_col]
-            
-            # Convert extracted value to lowercase for comparison
-            if extracted_value != "Not Found":
-                extracted_value = extracted_value.lower()
-                
-            # Check if values match
-            if extracted_value == "Not Found" or pd.isna(csv_value):
-                validation_results[query] = False
+
+            csv_value = matching_row[csv_col]  # Lowercase for matching
+            original_csv_value = original_row[csv_col]  # Original case for display
+
+            if pd.isna(original_csv_value):
+                validation_results[query]["csv_value"] = "Not Found"
             else:
-                # Allow partial matches for certain fields (like names)
-                if query in ["What is the customer name?", "What is the make?", "What is the model?"]:
-                    validation_results[query] = (extracted_value in csv_value or csv_value in extracted_value)
-                else:
-                    validation_results[query] = (extracted_value == csv_value)
-                    
-            logger.info(f"Validation for '{query}': {validation_results[query]} (Extracted: '{extracted_value}', CSV: '{csv_value}')")
-        
+                validation_results[query]["csv_value"] = original_csv_value
+
+            if extracted_value != "Not Found":
+                extracted_value_lower = extracted_value.lower()
+                if not pd.isna(csv_value):
+                    # Relaxed matching for text fields
+                    if query in ["What is the customer name?", "What is the make?", "What is the model?", 
+                                 "What is the Vehicle_Insurance_Company or policy provider company?"]:
+                        validation_results[query]["is_valid"] = (extracted_value_lower in csv_value or csv_value in extracted_value_lower)
+                    else:
+                        validation_results[query]["is_valid"] = (extracted_value_lower == csv_value)
+
+            validation_results[query]["primary_key_used"] = primary_key_used
+            logger.info(f"Validation for '{query}': is_valid={validation_results[query]['is_valid']}, Extracted='{extracted_value}', CSV='{validation_results[query]['csv_value']}', Primary Key='{primary_key_used}'")
+
         return validation_results

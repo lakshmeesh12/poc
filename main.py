@@ -1,3 +1,5 @@
+#main.py
+
 from fastapi import FastAPI
 import asyncio
 import os
@@ -14,14 +16,14 @@ from llm_text import process_with_llm_text
 from llm_image import process_with_llm_media
 from validation import CSVValidator
 from fastapi.middleware.cors import CORSMiddleware
-from tamper_detection import TamperDetector
 import shutil
 from typing import List
 from pydantic import BaseModel
 import boto3
-
-tamper_detector = TamperDetector()
-
+from fastapi.staticfiles import StaticFiles
+from pdf2image import convert_from_path
+from PIL import Image, ImageDraw
+import os
 # Load environment variables from .env file
 load_dotenv()
 
@@ -46,26 +48,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Create annotated_images directory if it doesn’t exist
+os.makedirs("annotated_images", exist_ok=True)
+
+# Mount the directory for serving static files
+app.mount("/annotated", StaticFiles(directory="annotated_images"), name="annotated")
+
 # Initialize AWS S3 client
 s3_client = boto3.client('s3', region_name="us-west-2")
+
 # Define your custom queries for the adapter
 QUERIES = [
     {"Text": "What is the chassis number?"},
     {"Text": "What is the engine number?"},
     {"Text": "What is the make?"},
     {"Text": "What is the model?"},
-    {"Text": "What is the color?"},
-    {"Text": "What is the customer name?"}
+    {"Text": "What is the customer name?"},
+    {"Text": "What is the InsuranceNo or policy number?"},
+    {"Text": "What is the Vehicle_Insurance_Company or policy provider company?"}
 ]
 
 # Result cache
 result_cache = {}
 
-# Hardcoded CSV file path for validation
-csv_path = "C:/Users/Quadrant/Downloads/sample database.csv"
+# Updated CSV file path for validation
+csv_path = "C:/Users/Quadrant/Downloads/Invoice ans Insurance Details.csv"
 
 async def process_file(file_path: str, csv_validator=None):
-    """Process a single invoice file with parallel tamper detection and text extraction."""
+    """Process a single invoice file with text extraction and validation."""
     try:
         # Check cache first
         file_hash = get_file_hash(file_path)
@@ -87,10 +97,6 @@ async def process_file(file_path: str, csv_validator=None):
         
         # Optimize file before processing
         optimized_file_bytes = optimize_file(file_path)
-        
-        # Start tamper detection in parallel with text extraction
-        logger.info(f"Starting parallel tamper detection for {file_path}")
-        tamper_detection_task = asyncio.create_task(tamper_detector.detect_tampering(file_path, {"is_pdf": is_pdf}))
         
         # FIRST ATTEMPT: Textract with adapter
         logger.info(f"ATTEMPT 1: Processing {file_path} with Textract adapter")
@@ -147,11 +153,8 @@ async def process_file(file_path: str, csv_validator=None):
         
         csv_validation_task = None
         if csv_validator is not None:
-            logger.info(f"Starting parallel CSV validation")
+            logger.info("Starting parallel CSV validation")
             csv_validation_task = asyncio.create_task(csv_validator.validate_against_csv(results))
-        
-        tamper_results = await tamper_detection_task
-        logger.info(f"Tamper detection completed for {file_path}")
         
         if third_attempt_task:
             llm_results = await third_attempt_task
@@ -168,6 +171,7 @@ async def process_file(file_path: str, csv_validator=None):
                         sources[query_text] = f"OpenAI {'PDF' if is_pdf else 'Image'} (Attempt 3)"
         
         csv_validation_results = {}
+        primary_key_used = "None"
         if csv_validation_task:
             try:
                 csv_validation_results = await csv_validation_task
@@ -176,6 +180,8 @@ async def process_file(file_path: str, csv_validator=None):
                     if validation["is_valid"]:
                         sources[query_text] += " + CSV Validated"
                     csv_matched_values[query_text] = validation["csv_value"]
+                    # Store the primary key used (will be the same for all fields in a match)
+                    primary_key_used = validation.get("primary_key_used", "None")
             except Exception as e:
                 logger.error(f"Error during CSV validation: {str(e)}")
                 import traceback
@@ -190,8 +196,73 @@ async def process_file(file_path: str, csv_validator=None):
             "validation_results": validation_results,
             "csv_validation_results": csv_validation_results,
             "csv_matched_values": csv_matched_values,
-            "tamper_detection": tamper_results
+            "primary_key_used": primary_key_used
         }
+
+        # Get mismatched queries (where csv_validated is False)
+        mismatched_queries = [query for query, valid in validation_results.items() if not valid]
+
+        # Parse Textract response to get LINE blocks with bounding boxes, grouped by page
+        line_blocks = [block for block in textract_response['Blocks'] if block['BlockType'] == 'LINE']
+        page_lines = {}
+        for block in line_blocks:
+            page = block.get('Page', 1)  # Default to page 1 if Page is missing (for images)
+            if page not in page_lines:
+                page_lines[page] = []
+            page_lines[page].append({
+                'text': block['Text'],
+                'bounding_box': block['Geometry']['BoundingBox']
+            })
+
+        # Find bounding boxes for mismatched values
+        mismatch_bboxes = {page: [] for page in page_lines}
+        for query in mismatched_queries:
+            value = results[query]
+            if value != "Not Found":
+                for page, lines in page_lines.items():
+                    for line in lines:
+                        # Case-insensitive search for the value in the line text
+                        if value.lower() in line['text'].lower():
+                            mismatch_bboxes[page].append(line['bounding_box'])
+
+        # Generate annotated images
+        annotated_images = []
+        if is_pdf:
+            # Convert PDF to a list of PIL images
+            pdf_images = convert_from_path(file_path)
+            for page_num, image in enumerate(pdf_images, start=1):
+                if page_num in mismatch_bboxes and mismatch_bboxes[page_num]:
+                    draw = ImageDraw.Draw(image)
+                    width, height = image.size
+                    for bbox in mismatch_bboxes[page_num]:
+                        # Convert Textract bounding box coordinates to pixel values
+                        left = bbox['Left'] * width
+                        top = bbox['Top'] * height
+                        right = (bbox['Left'] + bbox['Width']) * width
+                        bottom = (bbox['Top'] + bbox['Height']) * height
+                        draw.rectangle([left, top, right, bottom], outline="red", width=3)
+                    # Save annotated image with a unique name
+                    annotated_path = f"annotated_images/{file_hash}_page{page_num}.png"
+                    image.save(annotated_path)
+                    annotated_images.append(f"/annotated/{file_hash}_page{page_num}.png")
+        else:
+            # Process single image
+            image = Image.open(file_path)
+            if 1 in mismatch_bboxes and mismatch_bboxes[1]:
+                draw = ImageDraw.Draw(image)
+                width, height = image.size
+                for bbox in mismatch_bboxes[1]:
+                    left = bbox['Left'] * width
+                    top = bbox['Top'] * height
+                    right = (bbox['Left'] + bbox['Width']) * width
+                    bottom = (bbox['Top'] + bbox['Height']) * height
+                    draw.rectangle([left, top, right, bottom], outline="red", width=3)
+            annotated_path = f"annotated_images/{file_hash}.png"
+            image.save(annotated_path)
+            annotated_images.append(f"/annotated/{file_hash}.png")
+
+        # Add annotated image paths to final_result
+        final_result["annotated_images"] = annotated_images
         
         await save_to_cache(file_hash, final_result, result_cache)
         return final_result
@@ -302,22 +373,15 @@ async def extract_invoices(files: List[UploadFile] = File(...)):
                             "csv_value": csv_value
                         }
                 
-                tamper_info = result.get("tamper_detection", {})
                 formatted_results.append({
                     "filename": result["file"],
                     "file_type": result.get("file_type", "Image"),
                     "data": query_results,
                     "csv_validation": {
                         "status": "Validated" if any(r.get("csv_validated", False) for r in query_results.values()) else "Not Found in CSV",
-                        "primary_key": result["results"].get("What is the chassis number?", "Not Found")
+                        "primary_key": query_results.get(result.get("primary_key_used", "None"), {}).get("value", "Not Found")
                     },
-                    "tamper_detection": {
-                        "tampering_detected": tamper_info.get("tampering_detected", False),
-                        "confidence": tamper_info.get("confidence_score", 0.0),
-                        "methods": tamper_info.get("tampering_methods", []),
-                        "details": tamper_info.get("method_details", []),
-                        "annotated_image": tamper_info.get("annotated_image", "")  # Include annotated image
-                    }
+                    "annotated_images": result.get("annotated_images", [])  # Add this line
                 })
             else:
                 formatted_results.append({
@@ -335,10 +399,6 @@ async def extract_invoices(files: List[UploadFile] = File(...)):
             "csv_validation": {
                 "status": "Enabled" if csv_validator is not None else "Disabled",
                 "records_count": len(csv_validator.csv_df) if csv_validator is not None else 0
-            },
-            "tamper_detection": {
-                "status": "Enabled",
-                "methods_used": ["ELA", "Font Analysis", "Alignment Check", "Metadata Analysis", "Data Consistency"]
             }
         }
         final_response = convert_numpy_types(final_response)
@@ -365,7 +425,6 @@ async def list_buckets():
         logger.error(f"Error listing buckets: {str(e)}")
         return {"error": str(e)}
 
-# New endpoint to list files in a bucket
 @app.get("/list-files/")
 async def list_files(bucket: str):
     """List all files in the specified S3 bucket."""
@@ -380,13 +439,12 @@ async def list_files(bucket: str):
         logger.error(f"Error listing files in bucket {bucket}: {str(e)}")
         return {"error": str(e)}
 
-# New endpoint to process S3 files
 @app.post("/extract-invoices-s3/")
 async def extract_invoices_s3(request: S3Request):
     bucket = request.bucket
     file_keys = request.file_keys
     
-    """Process selected files from an S3 bucket for fraud and tampering detection."""
+    """Process selected files from an S3 bucket."""
     temp_dir = Path("temp_s3_downloads")
     temp_dir.mkdir(exist_ok=True)
     file_paths = []
@@ -448,7 +506,6 @@ async def extract_invoices_s3(request: S3Request):
                             "csv_value": csv_value
                         }
 
-                tamper_info = result.get("tamper_detection", {})
                 formatted_results.append({
                     "filename": result["file"],
                     "file_type": result.get("file_type", "Image"),
@@ -456,13 +513,6 @@ async def extract_invoices_s3(request: S3Request):
                     "csv_validation": {
                         "status": "Validated" if any(r.get("csv_validated", False) for r in query_results.values()) else "Not Found in CSV",
                         "primary_key": result["results"].get("What is the chassis number?", "Not Found")
-                    },
-                    "tamper_detection": {
-                        "tampering_detected": tamper_info.get("tampering_detected", False),
-                        "confidence": tamper_info.get("confidence_score", 0.0),
-                        "methods": tamper_info.get("tampering_methods", []),
-                        "details": tamper_info.get("method_details", []),
-                        "annotated_image": tamper_info.get("annotated_image", "")
                     }
                 })
             else:
@@ -481,10 +531,6 @@ async def extract_invoices_s3(request: S3Request):
             "csv_validation": {
                 "status": "Enabled" if csv_validator is not None else "Disabled",
                 "records_count": len(csv_validator.csv_df) if csv_validator is not None else 0
-            },
-            "tamper_detection": {
-                "status": "Enabled",
-                "methods_used": ["ELA", "Font Analysis", "Alignment Check", "Metadata Analysis", "Data Consistency"]
             }
         }
         final_response = convert_numpy_types(final_response)
