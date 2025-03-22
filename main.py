@@ -14,7 +14,7 @@ from utils import get_file_hash, get_cached_result, save_to_cache, optimize_file
 from textract import process_with_textract, extract_text_from_textract_response
 from llm_text import process_with_llm_text
 from llm_image import process_with_llm_media
-from validation import CSVValidator
+from validation import EnhancedCSVValidator
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 from typing import List
@@ -52,7 +52,8 @@ app.add_middleware(
 os.makedirs("annotated_images", exist_ok=True)
 
 # Mount the directory for serving static files
-app.mount("/annotated", StaticFiles(directory="annotated_images"), name="annotated")
+annotated_images_dir = os.path.abspath("annotated_images")
+app.mount("/annotated", StaticFiles(directory=annotated_images_dir), name="annotated")
 
 # Initialize AWS S3 client
 s3_client = boto3.client('s3', region_name="us-west-2")
@@ -182,11 +183,17 @@ async def process_file(file_path: str, csv_validator=None):
                     csv_matched_values[query_text] = validation["csv_value"]
                     # Store the primary key used (will be the same for all fields in a match)
                     primary_key_used = validation.get("primary_key_used", "None")
+                    
+                    # Store similarity score if available
+                    if "similarity_score" in validation:
+                        confidence_scores[query_text] = max(confidence_scores.get(query_text, 0), 
+                                                            validation["similarity_score"] * 100)  # Convert to percentage
             except Exception as e:
                 logger.error(f"Error during CSV validation: {str(e)}")
                 import traceback
                 logger.error(traceback.format_exc())
         
+        # Include similarity scores in the final result
         final_result = {
             "file": os.path.basename(file_path),
             "file_type": "PDF" if is_pdf else "Image",
@@ -196,7 +203,7 @@ async def process_file(file_path: str, csv_validator=None):
             "validation_results": validation_results,
             "csv_validation_results": csv_validation_results,
             "csv_matched_values": csv_matched_values,
-            "primary_key_used": primary_key_used
+            "primary_key_used": primary_key_used,
         }
 
         # Get mismatched queries (where csv_validated is False)
@@ -326,7 +333,8 @@ async def extract_invoices(files: List[UploadFile] = File(...)):
         csv_validator = None
         csv_file = Path(csv_path)
         if csv_file.exists() and csv_file.is_file():
-            csv_validator = CSVValidator()
+            # Use the enhanced validator instead of the basic one
+            csv_validator = EnhancedCSVValidator()
             csv_df = await csv_validator.load_csv_database(csv_path)
             if csv_df is None:
                 logger.error(f"Failed to load hardcoded CSV database from {csv_path}")
